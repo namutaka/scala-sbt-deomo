@@ -1,0 +1,13 @@
+services:
+  app:
+    image: "sbtscala/scala-sbt:eclipse-temurin-jammy-17.0.8.1_1_1.9.7_3.3.1"
+    volumes:
+      - ../:/workspace:cached
+    ports:
+      - 8080:8080
+    tty: true
+
+  redis:
+    image: redis:6-alpine
+    ports:
+      - 6379:6379

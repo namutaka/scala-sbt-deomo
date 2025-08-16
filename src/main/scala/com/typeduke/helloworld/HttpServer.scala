@@ -14,6 +14,7 @@ import io.lettuce.core.api.sync.RedisCommands
 import io.lettuce.core.api.async.RedisAsyncCommands
 import io.lettuce.core.XReadArgs
 import java.time.Duration
+import scala.concurrent.duration._
 
 object HttpServerRoutingMinimal {
 
@@ -27,7 +28,15 @@ object HttpServerRoutingMinimal {
       path("hello") {
         get {
           val numbers =
-            Source.fromIterator(() => Iterator.continually(Random.nextInt()))
+            Source
+              .tick(
+                1.second, // delay of first tick
+                1.second, // delay of subsequent ticks
+                "tick" // element emitted each tick
+              )
+              .map { _ =>
+                Random.nextInt()
+              }
 
           complete(
             HttpEntity(
@@ -52,6 +61,7 @@ object HttpServerRoutingMinimal {
   }
 }
 
+import collection.JavaConverters.asScalaBufferConverter
 object RedisStreamsExample {
   def main(args: Array[String]): Unit = {
     val redisClient = RedisClient.create("redis://localhost:6379")
@@ -63,9 +73,10 @@ object RedisStreamsExample {
     println(s"Message added with ID: $messageId")
 
     // ストリームからメッセージを読み取る
-    val messages = syncCommands.xread(XReadArgs.StreamOffset.from("mystream", "0-0"))
-    messages.await(1, Duration.ZERO).map { message =>
-      println(s"Message ID: ${message.getId}, Values: ${message.getValues}")
+    val messages = 
+      syncCommands.xread(XReadArgs().block(100).count(10), XReadArgs.StreamOffset.latest("mystream"));
+    messages.get().asScala.map { message =>
+      println(s"Message ID: ${message.getId}, Values: ${message.toString()}")
     }
 
     connection.close()

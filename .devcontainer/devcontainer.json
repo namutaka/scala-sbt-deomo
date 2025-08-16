@@ -1,17 +1,27 @@
 {
   "name": "scala-sbt-codespaces-template",
-  "image": "sbtscala/scala-sbt:eclipse-temurin-jammy-17.0.8.1_1_1.9.7_3.3.1",
+  "dockerComposeFile": ["docker-compose.yml"],
+  "workspaceFolder": "/workspace",
+  "service": "app",
+  "shutdownAction": "stopCompose",
   "customizations": {
     "vscode": {
       "extensions": [
+        "vscodevim.vim",
         // Scala
         "scala-lang.scala@0.5.7",
         "scalameta.metals@1.26.1",
         // Git
-        "Exelord.git-commits"
+        "Exelord.git-commits",
         // Various
         // "GitHub.copilot" // Uncomment to use GitHub Copilot
-      ]
+      ],
+      "terminal.integrated.profiles.linux": {
+        "bash": {
+          "path": "/bin/bash"
+        }
+      },
+      "terminal.integrated.defaultProfile.linux": "bash"
     }
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
