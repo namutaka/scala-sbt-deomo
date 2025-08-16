@@ -11,6 +11,9 @@ import akka.util.ByteString
 import io.lettuce.core.RedisClient
 import io.lettuce.core.api.StatefulRedisConnection
 import io.lettuce.core.api.sync.RedisCommands
+import io.lettuce.core.api.async.RedisAsyncCommands
+import io.lettuce.core.XReadArgs
+import java.time.Duration
 
 object HttpServerRoutingMinimal {
 
@@ -49,20 +52,19 @@ object HttpServerRoutingMinimal {
   }
 }
 
-
 object RedisStreamsExample {
   def main(args: Array[String]): Unit = {
     val redisClient = RedisClient.create("redis://localhost:6379")
     val connection: StatefulRedisConnection[String, String] = redisClient.connect()
-    val syncCommands: RedisCommands[String, String] = connection.sync()
+    val syncCommands: RedisAsyncCommands[String, String] = connection.async()
 
     // ストリームにメッセージを追加
     val messageId = syncCommands.xadd("mystream", "name", "John", "age", "30")
     println(s"Message added with ID: $messageId")
 
     // ストリームからメッセージを読み取る
-    val messages = syncCommands.xread(1, 1000, "mystream")
-    messages.forEach { message =>
+    val messages = syncCommands.xread(XReadArgs.StreamOffset.from("mystream", "0-0"))
+    messages.await(1, Duration.ZERO).map { message =>
       println(s"Message ID: ${message.getId}, Values: ${message.getValues}")
     }
 
