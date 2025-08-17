@@ -25,5 +25,5 @@
     }
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
-  "remoteUser": "sbtuser"
+  "remoteUser": "root"
 }
