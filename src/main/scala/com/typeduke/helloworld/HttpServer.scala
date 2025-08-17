@@ -23,6 +23,7 @@ import scala.concurrent.Future
 import akka.stream.Materializer
 import java.util.Date
 import akka.pattern.StatusReply.Success
+import akka.Done
 
 object HttpServerRoutingMinimal {
 
@@ -63,8 +64,7 @@ object HttpServerRoutingMinimal {
               val requestId = Random.nextInt(100).toString
               println(s"request $requestId")
 
-              val connection: StatefulRedisConnection[String, String] = redisClient.connect()
-              val source = subscribe(connection, "stream:" + user, requestId)
+              val source = subscribe2(redisClient, "stream:" + user, requestId)
                 .map { message =>
                   ByteString(message.toString() + "\n")
                 }
@@ -93,10 +93,11 @@ object HttpServerRoutingMinimal {
   }
 
   def subscribe(
-      connection: StatefulRedisConnection[String, String],
+      redisClient: RedisClient,
       stream: String,
       resuestId: String
   ) = {
+    val connection: StatefulRedisConnection[String, String] = redisClient.connect()
     val asyncCommands: RedisAsyncCommands[String, String] = connection.async()
 
     println(s"$resuestId subscribe")
@@ -116,6 +117,44 @@ object HttpServerRoutingMinimal {
             Some((nextId, messagesScala))
           }
       }
+      .mapConcat(identity)
+  }
+
+  def subscribe2(
+      redisClient: RedisClient,
+      stream: String,
+      requestId: String
+  ) = {
+    val connection: StatefulRedisConnection[String, String] = redisClient.connect()
+    val asyncCommands: RedisAsyncCommands[String, String] = connection.async()
+
+    println(s"$requestId subscribe")
+    // ストリームからメッセージを読み取る
+    var lastId = "$"
+    Source
+      .unfoldResourceAsync(
+        create = () => Future.successful(redisClient.connect()),
+        read = connection => {
+          println(s"xread pre $requestId: $lastId")
+          asyncCommands
+            .xread(
+              XReadArgs().block(1_000),
+              XReadArgs.StreamOffset.from(stream, lastId)
+            )
+            .asScala
+            .map { messages =>
+              val messagesScala = messages.asScala
+              val nextId = messagesScala.lastOption.map(_.getId()).getOrElse(lastId)
+              lastId = nextId
+              Some(messagesScala)
+            }
+        },
+        close = (connection) =>
+          connection.closeAsync().asScala.map { _ =>
+            println(s"close $requestId")
+            Done
+          }
+      )
       .mapConcat(identity)
   }
 }
