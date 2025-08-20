@@ -92,8 +92,6 @@ object RedisStreamsExample {
 
     println(s"2212")
 
-    val stream = "stream:1"
-
     val getF = {
       val connection: StatefulRedisConnection[String, String] = redisClient.connect()
       val syncCommands: RedisAsyncCommands[String, String] = connection.async()
@@ -105,20 +103,20 @@ object RedisStreamsExample {
           2.second, // delay of subsequent ticks
           "tick" // element emitted each tick
         )
-        .mapAsync(1) { e =>
+        .mapConcat { _ => 1 to 10 }
+        .mapAsync(10) { e =>
           println(s"xadd")
           // ストリームにメッセージを追加
-          Future.traverse(1 to Random.nextInt(10)) { i =>
-            syncCommands
-              .xadd(
-                stream,
-                Map("name" -> e, "age" -> Random.nextInt(100).toString, "id" -> i.toString).asJava
-              )
-              .asScala
-          }
-        }
-        .map { messageId =>
-          println(s"Message added with ID: $messageId")
+          val stream = "stream:" + Random.nextInt(2)
+          syncCommands
+            .xadd(
+              stream,
+              Map("name" -> e.toString, "age" -> Random.nextInt(100).toString).asJava
+            )
+            .asScala
+            .map { messageId =>
+              println(s"add: $stream : $messageId")
+            }
         }
         .runWith(
           Sink.ignore
@@ -130,7 +128,6 @@ object RedisStreamsExample {
     }
 
     println(s"444")
-    // Await.result(subscribe2, Duration.Inf)
     Await.result(getF, Duration.Inf)
 
     redisClient.shutdown()

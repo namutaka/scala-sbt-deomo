@@ -22,10 +22,21 @@ import concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import akka.stream.Materializer
 import java.util.Date
-import akka.pattern.StatusReply.Success
 import akka.Done
+import com.typeduke.helloworld.RedisStreamReadService
+import java.util.concurrent.LinkedBlockingQueue
+import scala.jdk.CollectionConverters._
+import scala.util.Failure
+import akka.actor.Status
+import akka.stream.CompletionStrategy
+import org.slf4j.LoggerFactory
+import scala.util.Success
+import io.lettuce.core.BitFieldArgs.OverflowType
+import akka.stream.OverflowStrategy
+import com.typeduke.helloworld.RedisStreamReadService.MessageData
 
 object HttpServerRoutingMinimal {
+  val logger = LoggerFactory.getLogger(this.getClass())
 
   def main(args: Array[String]): Unit = {
 
@@ -34,6 +45,9 @@ object HttpServerRoutingMinimal {
     implicit val executionContext = system.executionContext
 
     val redisClient = RedisClient.create("redis://redis:6379")
+
+    val service = new RedisStreamReadService()
+    service.start(redisClient)
 
     val route =
       concat(
@@ -62,12 +76,62 @@ object HttpServerRoutingMinimal {
           get {
             parameters("user") { (user) =>
               val requestId = Random.nextInt(100).toString
-              println(s"request $requestId")
+              logger.info(s"request $requestId")
 
-              val source = subscribe2(redisClient, "stream:" + user, requestId)
+              val source = service
+                .subscribe2(redisClient, "stream:" + user, requestId)
                 .map { message =>
                   ByteString(message.toString() + "\n")
                 }
+
+              complete(
+                HttpEntity(
+                  ContentTypes.`text/plain(UTF-8)`,
+                  source
+                )
+              )
+            }
+          }
+        },
+        path("sse2") {
+          get {
+            parameters("user") { (user) =>
+              val streamKey = "stream:" + user
+
+              val requestId = Random.nextInt(100).toString
+              println(s"request $streamKey - $requestId")
+
+              val source =
+                Source
+                  // .actorRefWithBackpressure[MessageData](
+                  //   ackMessage = "ack",
+                  //   // complete when we send akka.actor.status.Success
+                  //   completionMatcher = { case _: Status.Success =>
+                  //     CompletionStrategy.immediately
+                  //   },
+                  //   // do not fail on any message
+                  //   failureMatcher = PartialFunction.empty
+                  // )
+                  .actorRef[MessageData](32, OverflowStrategy.dropHead)
+                  .watchTermination() { (actorRef, future) =>
+                    val subscribeItem =
+                      service.subscribe(streamKey, (msg) => actorRef ! msg)
+
+                    future.onComplete { res =>
+                      logger.info("terminate: " + res.toString())
+                      service.unsubscribe(subscribeItem)
+                      res match {
+                        case Failure(exception) =>
+                          logger.error("terminate: " + res.toString(), exception)
+                        case Success(_) =>
+                          ()
+                      }
+                    }
+                    actorRef
+                  }
+                  .map { message =>
+                    ByteString(message.toString() + "\n")
+                  }
 
               complete(
                 HttpEntity(
@@ -87,74 +151,12 @@ object HttpServerRoutingMinimal {
       s"Server now online. Please navigate to http://localhost:8080/hello\nPress RETURN to stop..."
     )
     StdIn.readLine() // let it run until user presses return
+
+    service.stop()
+
     bindingFuture
       .flatMap(_.unbind()) // trigger unbinding from the port
       .onComplete(_ => system.terminate()) // and shutdown when done
   }
 
-  def subscribe(
-      redisClient: RedisClient,
-      stream: String,
-      resuestId: String
-  ) = {
-    val connection: StatefulRedisConnection[String, String] = redisClient.connect()
-    val asyncCommands: RedisAsyncCommands[String, String] = connection.async()
-
-    println(s"$resuestId subscribe")
-    // ストリームからメッセージを読み取る
-    Source
-      .unfoldAsync("$") { lastId =>
-        println(s"${new Date()} $resuestId xread")
-        asyncCommands
-          .xread(
-            XReadArgs().block(1_000),
-            XReadArgs.StreamOffset.from(stream, lastId)
-          )
-          .asScala
-          .map { messages =>
-            val messagesScala = messages.asScala
-            val nextId = messagesScala.lastOption.map(_.getId()).getOrElse(lastId)
-            Some((nextId, messagesScala))
-          }
-      }
-      .mapConcat(identity)
-  }
-
-  def subscribe2(
-      redisClient: RedisClient,
-      stream: String,
-      requestId: String
-  ) = {
-    val connection: StatefulRedisConnection[String, String] = redisClient.connect()
-    val asyncCommands: RedisAsyncCommands[String, String] = connection.async()
-
-    println(s"$requestId subscribe")
-    // ストリームからメッセージを読み取る
-    var lastId = "$"
-    Source
-      .unfoldResourceAsync(
-        create = () => Future.successful(redisClient.connect()),
-        read = connection => {
-          println(s"xread pre $requestId: $lastId")
-          asyncCommands
-            .xread(
-              XReadArgs().block(1_000),
-              XReadArgs.StreamOffset.from(stream, lastId)
-            )
-            .asScala
-            .map { messages =>
-              val messagesScala = messages.asScala
-              val nextId = messagesScala.lastOption.map(_.getId()).getOrElse(lastId)
-              lastId = nextId
-              Some(messagesScala)
-            }
-        },
-        close = (connection) =>
-          connection.closeAsync().asScala.map { _ =>
-            println(s"close $requestId")
-            Done
-          }
-      )
-      .mapConcat(identity)
-  }
 }
