@@ -31,11 +31,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Date
 import java.util.UUID
 import org.slf4j.LoggerFactory
+import scala.util.control.NonFatal
+import java.util.concurrent.atomic.AtomicReference
 
-class RedisStreamReadService {
+class RedisStreamReadService(redisClient: RedisClient) {
 
   def subscribe(
-      redisClient: RedisClient,
       stream: String,
       resuestId: String
   ) = {
@@ -63,7 +64,6 @@ class RedisStreamReadService {
   }
 
   def subscribe2(
-      redisClient: RedisClient,
       stream: String,
       requestId: String
   ) = {
@@ -104,7 +104,43 @@ class RedisStreamReadService {
   val receivers = scala.collection.mutable.HashMap[String, StreamReceiver]()
   val active = AtomicBoolean(true)
 
-  val executionContext = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(1))
+  val executor = Executors.newFixedThreadPool(1)
+  val executionContext = ExecutionContext.fromExecutor(executor)
+  val connectionHolder = AtomicReference[StatefulRedisConnection[String, String]]()
+
+  def withConnection[R](func: StatefulRedisConnection[String, String] => R): R = {
+    val connection = connectionHolder.updateAndGet { c =>
+      Option(c) match {
+        case None    => redisClient.connect()
+        case Some(e) => e
+      }
+    }
+    func(connection)
+  }
+
+  def readStream(streamKey: String, fromId: String) = {
+    withConnection { connection =>
+      val commands = connection.async()
+      val lastId = receivers.get(streamKey).map(_.lastId).filterNot(_ == "$").getOrElse("+")
+
+      logger.info(s"xrange: $fromId - $lastId")
+      import io.lettuce.core.{Range => XRange}
+      commands
+        .xrange(
+          streamKey,
+          XRange.from(
+            XRange.Boundary.including(fromId),
+            XRange.Boundary.including(lastId)
+          )
+        )
+        .asScala
+        .map(_.asScala.toSeq)
+        .recover { case e: Throwable =>
+          logger.error(s"xrange error: $e", e)
+          throw e
+        }
+    }
+  }
 
   def subscribe(streamKey: String, receiver: Receiver): SubscribeItem = synchronized {
     val id = UUID.randomUUID().toString()
@@ -117,8 +153,8 @@ class RedisStreamReadService {
 
       case None =>
         println(s"sub new : $streamKey")
-        subscribeQueue.offer(ReceiverTask(streamKey, "$"))
-        Some(StreamReceiver(streamKey, scala.collection.mutable.Map(id -> receiver)))
+        subscribeQueue.offer(ReceiverTask(streamKey))
+        Some(StreamReceiver(streamKey, "$", scala.collection.mutable.Map(id -> receiver)))
     }
 
     SubscribeItem(streamKey, id)
@@ -134,74 +170,89 @@ class RedisStreamReadService {
   }
 
   def stop() = {
+    Option(connectionHolder.get()).foreach { c =>
+      c.close()
+    }
+
     active.set(false)
+    executor.shutdownNow()
   }
 
-  def start(
-      redisClient: RedisClient
-  ) = {
+  def start() = {
     Future {
-      val connection: StatefulRedisConnection[String, String] = redisClient.connect()
-      val syncCommands: RedisCommands[String, String] = connection.sync()
-
-      try {
-        while (active.get()) {
-          val tasks = {
-            val tasks = Seq.newBuilder[ReceiverTask]
-            println("get task")
-            tasks.addOne(subscribeQueue.take())
-            while (tasks.knownSize < 5 && !subscribeQueue.isEmpty()) {
-              tasks.addOne(subscribeQueue.poll())
-            }
-            println("get task: END")
-            tasks.result()
-          }
-
-          val streams = tasks.map { task =>
-            XReadArgs.StreamOffset.from(task.streamKey, task.lastId)
-          }
-
-          println(s"xread : $streams")
-          val messages =
-            syncCommands.xread(XReadArgs().block(10_000), streams: _*).asScala
-
-          val newIdMap = {
-            val newIdMap = Map.newBuilder[String, String]
-            messages.foreach { message =>
-              val streamKey = message.getStream()
-              receivers.get(streamKey).foreach { receiver =>
-                receiver.receivers.foreach { (_, receiver) => receiver(message) }
-              }
-
-              newIdMap.addOne(streamKey -> message.getId())
-            }
-            newIdMap.result()
-          }
-
-          val renewTasks =
-            tasks
-              .filter { task =>
-                receivers.contains(task.streamKey)
-              }
-              .map { task =>
-                newIdMap.get(task.streamKey) match {
-                  case Some(lastId) => task.copy(lastId = lastId)
-                  case None         => task
-                }
-              }
-
-          subscribeQueue.addAll(renewTasks.toSeq)
-          println("recievers: " + subscribeQueue.map { r => r.log }.mkString(" , "))
-        }
-      } catch {
-        case e: Throwable =>
-          logger.error(s"error: $e", e)
-
-      } finally {
-        connection.close()
-      }
+      subscribeLoop()
       println("finish")
     }(executionContext)
+      .recover { case e => () }
+  }
+
+  private def subscribeLoop() = {
+    val connection: StatefulRedisConnection[String, String] = redisClient.connect()
+    val syncCommands: RedisCommands[String, String] = connection.sync()
+
+    try {
+      while (active.get()) {
+        val tasks = {
+          val tasks = Seq.newBuilder[ReceiverTask]
+          println("get task")
+          tasks.addOne(subscribeQueue.take())
+          while (tasks.knownSize < 5 && !subscribeQueue.isEmpty()) {
+            Option(subscribeQueue.poll()).foreach {
+              tasks.addOne(_)
+            }
+          }
+          println("get task: END")
+          tasks.result()
+        }
+
+        val streams = tasks.flatMap { task =>
+          receivers.get(task.streamKey).map { r =>
+            XReadArgs.StreamOffset.from(task.streamKey, r.lastId)
+          }
+        }
+
+        println(s"xread : $streams")
+        val messages =
+          syncCommands.xread(XReadArgs().block(10_000), streams: _*).asScala
+
+        val newIdMap = {
+          val newIdMap = Map.newBuilder[String, String]
+          messages.foreach { message =>
+            val streamKey = message.getStream()
+            receivers.get(streamKey).foreach { receiver =>
+              receiver.receivers.foreach { (_, receiver) => receiver(message) }
+            }
+
+            newIdMap.addOne(streamKey -> message.getId())
+          }
+          newIdMap.result()
+        }
+
+        val renewTasks = tasks.filter { task =>
+          receivers
+            .updateWith(task.streamKey) {
+              case Some(p) =>
+                newIdMap.get(task.streamKey) match {
+                  case Some(lastId) =>
+                    Some(p.copy(lastId = lastId))
+                  case None =>
+                    Some(p)
+                }
+              case None => None
+            }
+            .nonEmpty
+        }
+
+        subscribeQueue.addAll(renewTasks.toSeq)
+        println("recievers: " + subscribeQueue.map { r => r.log }.mkString(" , "))
+      }
+    } catch {
+      case NonFatal(e) =>
+        logger.error(s"error: $e", e)
+
+    } finally {
+      connection.close()
+    }
   }
 }
 
@@ -213,12 +264,13 @@ object RedisStreamReadService {
 
   case class SubscribeItem(streamKey: String, id: ID)
 
-  case class ReceiverTask(streamKey: String, lastId: String) {
-    def log = s"$streamKey:$lastId"
+  case class ReceiverTask(streamKey: String) {
+    def log = s"$streamKey"
   }
 
   case class StreamReceiver(
       streamKey: String,
+      lastId: String,
       receivers: scala.collection.mutable.Map[ID, Receiver]
   )
 }

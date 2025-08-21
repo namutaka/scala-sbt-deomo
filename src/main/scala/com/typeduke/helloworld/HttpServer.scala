@@ -46,8 +46,8 @@ object HttpServerRoutingMinimal {
 
     val redisClient = RedisClient.create("redis://redis:6379")
 
-    val service = new RedisStreamReadService()
-    service.start(redisClient)
+    val service = new RedisStreamReadService(redisClient)
+    val subscribeFuture = service.start()
 
     val route =
       concat(
@@ -79,7 +79,7 @@ object HttpServerRoutingMinimal {
               logger.info(s"request $requestId")
 
               val source = service
-                .subscribe2(redisClient, "stream:" + user, requestId)
+                .subscribe2("stream:" + user, requestId)
                 .map { message =>
                   ByteString(message.toString() + "\n")
                 }
@@ -95,7 +95,7 @@ object HttpServerRoutingMinimal {
         },
         path("sse2") {
           get {
-            parameters("user") { (user) =>
+            parameters("user", "lastId".optional) { (user, lastIdOpt) =>
               val streamKey = "stream:" + user
 
               val requestId = Random.nextInt(100).toString
@@ -129,14 +129,27 @@ object HttpServerRoutingMinimal {
                     }
                     actorRef
                   }
-                  .map { message =>
-                    ByteString(message.toString() + "\n")
-                  }
+
+              val rewindSource =
+                Source
+                  .fromFuture(
+                    lastIdOpt match {
+                      case Some(id) =>
+                        service.readStream(streamKey, id)
+                      case None =>
+                        Future.successful(Seq.empty)
+                    }
+                  )
+                  .mapConcat(identity)
 
               complete(
                 HttpEntity(
                   ContentTypes.`text/plain(UTF-8)`,
-                  source
+                  rewindSource
+                    .merge(source)
+                    .map { message =>
+                      ByteString(message.toString() + "\n")
+                    }
                 )
               )
             }
@@ -154,9 +167,13 @@ object HttpServerRoutingMinimal {
 
     service.stop()
 
-    bindingFuture
-      .flatMap(_.unbind()) // trigger unbinding from the port
-      .onComplete(_ => system.terminate()) // and shutdown when done
+    Await.result(
+      bindingFuture.flatMap(_.unbind()) // trigger unbinding from the port
+      ,
+      Duration.Inf
+    )
+    Await.result(subscribeFuture, Duration.Inf)
+    system.terminate()
   }
 
 }
