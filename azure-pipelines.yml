@@ -10,6 +10,9 @@ pr:
   branches:
     include:
       - main
+  paths:
+    include:
+     - build.sbt
 
 pool:
   name: Default
