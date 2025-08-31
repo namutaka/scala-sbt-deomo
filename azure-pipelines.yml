@@ -27,6 +27,9 @@ steps:
   displayName: Cache packages
 
 - script: |
+    cat target/file.txt || true
+
+- script: |
     mkdir -p target
     env > target/file.txt
     cat target/file.txt
