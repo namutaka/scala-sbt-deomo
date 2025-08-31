@@ -23,3 +23,4 @@ libraryDependencies ++= Seq(
   "io.lettuce" % "lettuce-core" % "6.7.1.RELEASE",
   "org.slf4j" % "slf4j-simple" % "2.0.17"
 )
+
