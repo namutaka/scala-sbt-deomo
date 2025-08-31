@@ -18,6 +18,13 @@ pool:
   name: Default
 
 steps:
+- task: Cache@2
+  inputs:
+    key: '"hoge" | "$(Agent.OS)" | build.sbt'
+    restoreKeys: |
+       "hoge" | "$(Agent.OS)" | "main"
+    path: target
+  displayName: Cache packages
 
 - script: |
     mkdir -p target
