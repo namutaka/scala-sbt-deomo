@@ -20,7 +20,7 @@ pool:
 steps:
 - task: Cache@2
   inputs:
-    key: '"hoge" | "$(Agent.OS)" | build.sbt | "$(BUILD_SOURCEBRANCHNAME)" | "$(SYSTEM_PULLREQUEST_TARGETBRANCH)"'
+    key: '"hoge" | "$(Agent.OS)" | build.sbt | "$(BUILD.SOURCEBRANCHNAME)" | "$(SYSTEM.PULLREQUEST.TARGETBRANCH)"'
     restoreKeys: |
        "hoge" | "$(Agent.OS)" | "main"
     path: target
